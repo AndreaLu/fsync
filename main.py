@@ -94,7 +94,7 @@ def updateDatabase(dirname,totCount):
                 newRoot = [d for d in root["directories"] if d["name"] == f][0]
             core(newRoot, pj(dirname, f), bar, False)
 
-    with alive_bar(totCount) as bar:
+    with alive_bar(totCount,spinner="arrows") as bar:
         if not os.path.isdir(dirname):
             raise Exception(f"{dirname} is not a valid directory!")
         if os.path.isfile(pj(dirname, "fsync.db")):
@@ -190,7 +190,7 @@ def syncDirectories(srcDirname, dstDirname, dryRun=False):
                     shutil.copytree(  pj(srcDirname,sd["name"]) , pj(dstDirname,sd["name"]) )
 
     print(f"Syncronizing {srcDirname} to {dstDirname}...")
-    with alive_bar(srcTotCount) as bar:
+    with alive_bar(srcTotCount,spinner="arrows") as bar:
         core(srcDB, dstDB, srcDirname, dstDirname, dryRun, bar)
         bar(srcTotCount)
     print("Re-updating dst database...")
@@ -198,12 +198,15 @@ def syncDirectories(srcDirname, dstDirname, dryRun=False):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 3:
+    if len(sys.argv) != 3 and len(sys.argv) != 4:
         print("Wrong usage. Please use like this: `fsync <src> <dst>`")
     srcDir,dstDir = sys.argv[1],sys.argv[2]
-    ans = input(f"This will sync {srcDir} to {dstDir}, continue?[Y/N]: ")
-    if ans.lower() == "y":
-        syncDirectories(sys.argv[1],sys.argv[2])
+    dryRun = "--dry" in sys.argv
+    if dryRun: print("This will compare {srcDir} to {dstDir} and print the differences.")
     else:
-        print("Doing nothing...")
+        ans = input(f"This will sync {srcDir} to {dstDir}, continue?[Y/N]: ")
+        if ans.lower() == "y":
+            syncDirectories(sys.argv[1],sys.argv[2],dryRun)
+        else:
+            print("Doing nothing...")
     input("Press ENTER to continue...")
