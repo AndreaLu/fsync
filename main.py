@@ -2,7 +2,8 @@ import os,shutil                     # filesystem management
 import utils                         # DB management functions
 import sys                           # input arguments
 from alive_progress import alive_bar # loading bar
-
+import re                            # regex for ignored files
+import argparse                      # to parse input arguments
 # Database structure:
 # {
 #   "name":"root"
@@ -30,18 +31,66 @@ from alive_progress import alive_bar # loading bar
 pj = os.path.join
 rp = os.path.relpath
 
+excludePatterns = []
+
+# srcBaseDir: root directory src come argomento di fsync
+# srcDir: directory figlia di srcBaseDir (o al più coincidente con srcBaseDir) da copiare
+# dstDir: directory destinazione in cui copiare srcBaseDir. Non deve esistere
+def copyTreeWithIgnores(srcBaseDir,srcDir,dstDir):
+    # Funzione ricorsiva che butta fuori una lista di file da copiare, filtrata con gli ignore
+    def getDirList(srcBaseDir,srcDir,currDir=None,dirList=[]):
+        if currDir is None: currDir = srcDir
+        for f in os.listdir(currDir):
+            fname = pj(currDir,f)
+            if isIgnored( rp( fname,srcBaseDir ) ): continue
+            dirList.append( rp(fname,srcDir) )
+            if os.path.isdir( fname ):
+                getDirList(srcBaseDir,srcDir,currDir=fname,dirList=dirList)
+        return dirList
+
+    dirList = getDirList( srcBaseDir, srcDir )
+    if os.path.exists( dstDir ):
+        raise Exception("dest already exist")
+    os.mkdir(dstDir)
+    for f in dirList:
+        if os.path.isdir(pj(srcDir,f)): os.mkdir(pj(dstDir,f))
+        else: shutil.copyfile( pj(srcDir,f), pj(dstDir,f) )
+
+def parseExcludeFile(filename):
+    global excludePatterns
+    with open(filename) as fin:
+        for line in fin.readlines():
+            line = line.replace("\r","").replace("\n","")
+            if "#" in line: line = line[:line.find("#")]
+            if len(line) > 0:
+                while len(line) > 0 and (line[0] == " " or line[0] == "\t"): line = line[1:]
+                while len(line) > 0 and (line[-1] == " " or line[-1] == "\t"): line = line[:-1]
+                excludePatterns.append(line)
+                print(f"loaded ep: '{line}'")
+            
+
+def isIgnored(filename):
+    global excludePatterns
+    for pattern in excludePatterns:
+        if re.search(pattern=pattern,string=filename) is not None:
+            return True
+    return False
+
 """
 If dirname already has a database, update it, otherwise, create it.
 The database holds information about the size, hash, name, date of last edit
 for every file in the directory.
 """
 def updateDatabase(dirname,totCount):
-    def core(root, dirname, bar, isRoot=True):
-        # Add or update records of existing files
+    def core(root, dirname, bar, isRoot=True, baseDir=None):
+        # Add or update records of existing files if not currently ignored
         for f in os.listdir(dirname):
             fname = pj(dirname, f)
             if not os.path.isfile(fname): continue 
-            if isRoot and f == "fsync.db": continue 
+            if isRoot and f == "fsync.db": continue
+            if isRoot: baseDir = dirname
+            if isIgnored( rp(fname,baseDir) ): 
+                continue
             # Update data of this file if it is not already in the DB, or if the last edit date
             # or the size in bytes are different from the recorded ones
             # The main thing here is the hash calculation
@@ -59,29 +108,31 @@ def updateDatabase(dirname,totCount):
                 root["files"].append(file)
             bar()
 
-        # Delete records of files no longer existing
+        # Delete records of files no longer existing or currently ignored
         toRemove = []
         for i in range(len(root["files"])):
             f = root["files"][i]
-            if not os.path.isfile(pj(dirname, f["name"])):
+            fname = pj(dirname, f["name"])
+            if not os.path.isfile(fname) or isIgnored( rp(fname,baseDir) ):
                 toRemove.append(i-len(toRemove))
         for i in toRemove:
             del root["files"][i]
         toRemove.clear()
 
-        # Delete the records of directories no longer existing
+        # Delete the records of directories no longer existing or currently ignored
         for i in range(len(root["directories"])):
             d = root["directories"][i]
-            if not os.path.isdir(pj(dirname, d["name"])):
+            dirName = pj(dirname, d["name"])
+            if not os.path.isdir(dirName) or isIgnored( rp(dirName,baseDir) ):
                 toRemove.append(i-len(toRemove))
         for i in toRemove:
             del root["directories"][i]
 
-        # Adds records of directories not present in DB and recursively calls back this function
-        # in the subdirectories of root
+        # Adds records of directories not present in DB if they are not ignored and recursively 
+        # calls back this function in the subdirectories of root
         for f in os.listdir(dirname):
             xxx = pj(dirname, f)
-            if not os.path.isdir(xxx):
+            if not os.path.isdir(xxx) or isIgnored( rp(xxx,baseDir) ):
                 continue
             if f not in [d["name"] for d in root["directories"]]:
                 newRoot = {
@@ -92,7 +143,7 @@ def updateDatabase(dirname,totCount):
                 root["directories"].append(newRoot)
             else:
                 newRoot = [d for d in root["directories"] if d["name"] == f][0]
-            core(newRoot, pj(dirname, f), bar, False)
+            core(newRoot, pj(dirname, f), bar, False, baseDir)
 
     with alive_bar(totCount,spinner="arrows") as bar:
         if not os.path.isdir(dirname):
@@ -144,8 +195,9 @@ def syncDirectories(srcDirname, dstDirname, dryRun=False):
     dstDB = utils.loadDB(dstDirname)
     
     # Recursive function that synchronizes the inner directories
-    def core(srcNode, dstNode, srcDirname, dstDirname, dryRun, bar, dstRoot=None):
+    def core(srcNode, dstNode, srcDirname, dstDirname, dryRun, bar, dstRoot=None, srcRoot=None):
         if dstRoot is None: dstRoot = dstDirname
+        if srcRoot is None: srcRoot = srcDirname
         # Update or add files from srcNode to dstNode
         for sf in srcNode["files"]:
             df = [f for f in dstNode["files"] if f["name"] == sf["name"]]
@@ -177,17 +229,17 @@ def syncDirectories(srcDirname, dstDirname, dryRun=False):
                 print(f"- Removing directory <dst>/{rp(pj(dstDirname,dd['name']),dstRoot)}")
                 if not dryRun: shutil.rmtree( pj(dstDirname,dd["name"]) )
 
-        # Reiterate recursively in the directories in srcNode that are already in dstNode
-        # Copy the directories in srcNode that are not in dstNode.
+        # If the dirs in srcNode are not in dstNode, create the dirs in dstNode.
+        # Reiterate recursively in the directories in srcNode
         for sd in srcNode["directories"]:
             dd = [d for d in dstNode["directories"] if d["name"] == sd["name"]]
             dd = dd[0] if (dirInDst := len(dd) > 0 ) else None
             if dirInDst:
-                core(sd,dd,pj(srcDirname,sd["name"]),pj(dstDirname,dd["name"]),dryRun,bar,dstRoot)
+                core(sd,dd,pj(srcDirname,sd["name"]),pj(dstDirname,dd["name"]),dryRun,bar,dstRoot,srcRoot)
             else:
                 print(f"- Adding directory <dst>/{rp(pj(dstDirname,sd['name']),dstRoot)}")
                 if not dryRun:
-                    shutil.copytree(  pj(srcDirname,sd["name"]) , pj(dstDirname,sd["name"]) )
+                    copyTreeWithIgnores( srcRoot, pj(srcDirname,sd["name"]) , pj(dstDirname,sd["name"]) )
 
     print(f"Syncronizing {srcDirname} to {dstDirname}...")
     with alive_bar(srcTotCount,spinner="arrows") as bar:
@@ -198,15 +250,21 @@ def syncDirectories(srcDirname, dstDirname, dryRun=False):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 3 and len(sys.argv) != 4:
-        print("Wrong usage. Please use like this: `fsync <src> <dst>`")
-    srcDir,dstDir = sys.argv[1],sys.argv[2]
-    dryRun = "--dry" in sys.argv
-    if dryRun: print("This will compare {srcDir} to {dstDir} and print the differences.")
+    parser = argparse.ArgumentParser(prog="fsync",description="synchronizes two directories")
+    parser.add_argument("src")
+    parser.add_argument("dst")
+    parser.add_argument("-d","--dry", action="store_true")
+    parser.add_argument("--excludeFile",action="store",required=False)
+    args = parser.parse_args()
+    srcDir,dstDir,dryRun,excludeFile = args.src,args.dst,args.dry,args.excludeFile
+
+    # Load excludeFile
+    if excludeFile is not None:
+        parseExcludeFile(excludeFile)
+
+    if dryRun:
+        print(f"This run will compare {srcDir} to {dstDir} and print the differences.")
     else:
-        ans = input(f"This will sync {srcDir} to {dstDir}, continue?[Y/N]: ")
-        if ans.lower() == "y":
-            syncDirectories(sys.argv[1],sys.argv[2],dryRun)
-        else:
-            print("Doing nothing...")
+        if input(f"This will sync {srcDir} to {dstDir}, continue?[Y/N]: ").lower() != "y": exit(0)
+    syncDirectories(srcDir,dstDir,dryRun)
     input("Press ENTER to continue...")
