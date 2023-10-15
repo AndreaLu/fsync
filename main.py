@@ -245,8 +245,6 @@ def syncDirectories(srcDirname, dstDirname, dryRun=False):
     with alive_bar(srcTotCount,spinner="arrows") as bar:
         core(srcDB, dstDB, srcDirname, dstDirname, dryRun, bar)
         bar(srcTotCount)
-    print("Re-updating dst database...")
-    updateDatabase(dstDirname,srcTotCount)
 
 
 if __name__ == "__main__":
